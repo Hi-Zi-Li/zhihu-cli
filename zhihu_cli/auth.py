@@ -14,8 +14,11 @@ from __future__ import annotations
 
 import json
 import logging
+import subprocess
+import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import requests
 
@@ -35,6 +38,13 @@ from .display import console, print_error, print_hint, print_info, print_success
 from .exceptions import LoginError
 
 logger = logging.getLogger(__name__)
+
+BROWSER_EXPORT_COOKIE_NAMES = ("z_c0", "_xsrf", "d_c0")
+BROWSER_POLL_TIMEOUT_S = 240
+
+
+class BrowserQrLoginUnavailable(LoginError):
+    """Raised when browser-assisted QR login cannot be started."""
 
 
 def get_saved_cookie_string() -> str | None:
@@ -96,14 +106,179 @@ def _load_saved_cookies() -> str | None:
     return None
 
 
-def qrcode_login() -> str:
-    """Login via QR code using API only (no Playwright).
+def qrcode_login(
+    *,
+    prefer_browser_assisted: bool = False,
+    timeout_s: int = BROWSER_POLL_TIMEOUT_S,
+) -> str:
+    """Login via QR code.
 
-    Calls POST /api/v3/account/api/login/qrcode to get token and link,
-    displays the link as QR in terminal (qrcode lib), then polls
-    scan_info until user scans and confirms; returns cookie string.
+    When ``prefer_browser_assisted`` is set, a real Camoufox browser window is
+    used for scanning and confirmation, then cookies are exported from the live
+    browser context. Otherwise the legacy API polling flow is used.
     """
+    if prefer_browser_assisted:
+        return _browser_assisted_qrcode_login(timeout_s=timeout_s)
     return _qrcode_login_api()
+
+
+def _normalize_browser_cookies(raw_cookies: list[dict[str, Any]]) -> dict[str, str]:
+    """Convert Playwright cookies into the local persisted cookie shape."""
+    cookies: dict[str, str] = {}
+    for entry in raw_cookies:
+        name = entry.get("name")
+        value = entry.get("value")
+        domain = entry.get("domain", "")
+        if not isinstance(name, str) or not isinstance(value, str):
+            continue
+        if name not in BROWSER_EXPORT_COOKIE_NAMES:
+            continue
+        if not isinstance(domain, str) or "zhihu.com" not in domain:
+            continue
+        cookies[name] = value
+    return cookies
+
+
+def _export_browser_context_cookies(page: Any) -> dict[str, str]:
+    """Export cookies directly from the live browser context."""
+    return _normalize_browser_cookies(page.context.cookies())
+
+
+def _enrich_browser_cookie_dict(cookie_dict: dict[str, str]) -> dict[str, str]:
+    """Backfill missing required cookies when the browser only exposed z_c0."""
+    if _has_required_cookies(cookie_dict) or "z_c0" not in cookie_dict:
+        return dict(cookie_dict)
+    return _fetch_missing_cookies(cookie_dict)
+
+
+def _validate_browser_exported_session(
+    cookie_dict: dict[str, str],
+    *,
+    retries: int = 3,
+    wait_s: float = 1.5,
+) -> dict[str, str]:
+    """Validate cookies exported from Camoufox by calling /api/v4/me."""
+    if not cookie_dict:
+        raise LoginError("Browser-assisted login did not export any cookies.")
+
+    last_error: Exception | None = None
+    current = dict(cookie_dict)
+
+    for attempt in range(retries):
+        current = _enrich_browser_cookie_dict(current)
+        if _has_required_cookies(current):
+            from .client import ZhihuClient
+
+            try:
+                with ZhihuClient(current) as client:
+                    info = client.get_self_info()
+            except Exception as exc:
+                last_error = exc
+            else:
+                if isinstance(info, dict) and info:
+                    return current
+                last_error = LoginError(
+                    f"Browser-assisted login returned an empty profile payload: {info!r}"
+                )
+        else:
+            last_error = LoginError(
+                "Browser-assisted login has not produced all required cookies yet."
+            )
+
+        if attempt + 1 < retries:
+            time.sleep(wait_s)
+
+    raise LoginError(
+        "Browser-assisted login exported cookies, but they did not validate "
+        f"as a logged-in Zhihu session. error={last_error}"
+    )
+
+
+def _ensure_camoufox_ready() -> None:
+    """Validate that the Camoufox package and browser runtime are available."""
+    try:
+        import camoufox  # noqa: F401
+    except ImportError as exc:
+        raise BrowserQrLoginUnavailable(
+            "Browser-assisted login requires the `camoufox` package."
+        ) from exc
+
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "camoufox", "path"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise BrowserQrLoginUnavailable(
+            "Unable to validate the Camoufox browser installation."
+        ) from exc
+
+    if result.returncode != 0 or not result.stdout.strip():
+        raise BrowserQrLoginUnavailable(
+            "Camoufox browser runtime is missing. Run `python -m camoufox fetch` first."
+        )
+
+
+def _browser_assisted_qrcode_login(*, timeout_s: int = BROWSER_POLL_TIMEOUT_S) -> str:
+    """Complete QR login in a real browser window and export validated cookies."""
+    _ensure_camoufox_ready()
+
+    try:
+        from camoufox.sync_api import Camoufox
+    except ImportError as exc:
+        raise BrowserQrLoginUnavailable(
+            "Camoufox sync API is unavailable in the current environment."
+        ) from exc
+
+    print_info("Starting browser-assisted QR login...")
+    print_hint("Use the QR code shown in the browser window and keep that window open.")
+    print_hint("If Zhihu opens password login first, switch to the QR login tab manually.")
+
+    deadline = time.time() + timeout_s
+    last_validation_error: Exception | None = None
+
+    with Camoufox(headless=False) as browser:
+        page = browser.new_page()
+        try:
+            page.goto(ZHIHU_LOGIN_URL, wait_until="domcontentloaded")
+        except Exception as exc:
+            raise LoginError("Failed to load Zhihu login page in Camoufox.") from exc
+
+        try:
+            page.wait_for_load_state("networkidle", timeout=10_000)
+        except Exception:
+            logger.debug("Camoufox Zhihu login page did not reach networkidle before timeout")
+
+        while time.time() < deadline:
+            if page.is_closed():
+                raise LoginError(
+                    "Browser-assisted login browser window was closed before login completed."
+                )
+
+            cookies = _export_browser_context_cookies(page)
+            if cookies:
+                try:
+                    validated = _validate_browser_exported_session(
+                        cookies,
+                        retries=1,
+                        wait_s=0,
+                    )
+                except Exception as exc:
+                    last_validation_error = exc
+                    logger.debug("Browser cookie validation not ready yet: %s", exc)
+                else:
+                    cookie_str = _dict_to_cookie_str(validated)
+                    save_cookies(cookie_str)
+                    return cookie_str
+
+            time.sleep(1.5)
+
+    raise LoginError(
+        "Browser-assisted login timed out before exported browser cookies became "
+        f"a valid session. last_error={last_validation_error}"
+    )
 
 
 def _set_xsrf_header(session: requests.Session) -> None:

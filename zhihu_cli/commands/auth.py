@@ -9,6 +9,7 @@ import click
 from click.core import ParameterSource
 
 from ..auth import (
+    BrowserQrLoginUnavailable,
     clear_cookies,
     cookie_str_to_dict,
     get_cookie_string,
@@ -58,14 +59,25 @@ def _verify_cookies(cookie_dict: dict) -> bool | None:
 
 @click.command()
 @click.option("--qrcode", is_flag=True, help="Use QR code to login")
+@click.option(
+    "--browser-assisted",
+    is_flag=True,
+    help="Use a real Camoufox browser window for QR login and export cookies from it",
+)
 @click.option("--cookie", "cookie_str", default=None, help="Provide cookie string directly")
 @click.pass_context
-def login(ctx: click.Context, qrcode: bool, cookie_str: str | None):
+def login(
+    ctx: click.Context,
+    qrcode: bool,
+    browser_assisted: bool,
+    cookie_str: str | None,
+):
     """Authenticate with Zhihu.
 
     \b
     Methods:
       --qrcode   Scan QR code with Zhihu app (recommended)
+      --browser-assisted   Use a real browser window during QR login
       --cookie   Paste cookie string (must contain z_c0, _xsrf, d_c0)
     """
     cookie_provided = (
@@ -97,9 +109,12 @@ def login(ctx: click.Context, qrcode: bool, cookie_str: str | None):
                 return
 
     # QR code login
+    if browser_assisted and not qrcode:
+        qrcode = True
+
     print_info("Launching QR code login…")
     try:
-        cookie = qrcode_login()
+        cookie = qrcode_login(prefer_browser_assisted=browser_assisted)
         cookie_dict = cookie_str_to_dict(cookie)
         verify_result = _verify_cookies(cookie_dict)
         if verify_result is False:
@@ -107,6 +122,10 @@ def login(ctx: click.Context, qrcode: bool, cookie_str: str | None):
             print_error("Login completed but session is invalid — please retry")
             sys.exit(1)
         print_success("Login successful — cookie saved")
+    except BrowserQrLoginUnavailable as e:
+        print_error(f"Browser-assisted login unavailable: {e}")
+        print_hint("Install Camoufox and run `python -m camoufox fetch`, or use `zhihu login --qrcode`.")
+        sys.exit(1)
     except Exception as e:
         print_error(f"Login failed: {e}")
         sys.exit(1)

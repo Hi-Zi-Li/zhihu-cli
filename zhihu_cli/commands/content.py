@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sys
 from contextlib import contextmanager
+from urllib.parse import parse_qs, urlparse
 
 import click
 
@@ -305,6 +306,113 @@ def answer(answer_id: int, as_json: bool, comments: bool, limit: int):
                 c_likes = format_count(c.get("vote_count", 0))
                 console.print(f"  [dim]{i}.[/dim] {c_content}  [dim]{c_likes} likes[/dim]")
             console.print()
+
+
+@click.command("comments")
+@click.argument("entity_type", type=click.Choice(["answer", "article", "question"]))
+@click.argument("item_id")
+@click.option("--offset", default="", help="Pagination offset/cursor")
+@click.option("-l", "--limit", default=10, help="Comments per page", show_default=True)
+@click.option("--json", "as_json", is_flag=True, help="Output raw JSON")
+def comments(entity_type: str, item_id: str, offset: str, limit: int, as_json: bool):
+    """Fetch one page of comments for an answer/article."""
+
+    def _extract_next_offset(next_url: str) -> str:
+        if not next_url:
+            return ""
+        parsed = urlparse(next_url)
+        return (parse_qs(parsed.query).get("offset") or [""])[0]
+
+    def _normalize_comment(comment: dict) -> dict:
+        author = comment.get("author", {}) if isinstance(comment.get("author"), dict) else {}
+        return {
+            "id": str(comment.get("id", "")),
+            "author": {
+                "id": str(author.get("id", "")),
+                "name": author.get("name", "Anonymous"),
+            },
+            "content": strip_html(comment.get("content", "")),
+            "vote_count": comment.get("vote_count", 0),
+            "reply_count": (
+                comment.get("reply_comment_count")
+                or comment.get("child_comment_count")
+                or comment.get("child_comment_total_count")
+                or 0
+            ),
+        }
+
+    with _get_client() as client:
+        if entity_type == "question":
+            payload = {
+                "source": "zhihu",
+                "entity_type": entity_type,
+                "item_id": item_id,
+                "cursor": offset,
+                "next_cursor": "",
+                "limit": limit,
+                "has_more": False,
+                "total_count": None,
+                "comments": [],
+                "warning": "question_comments_not_supported",
+            }
+        elif entity_type == "answer":
+            numeric_offset = int(offset or 0)
+            result = client.get_answer_comments(item_id, offset=numeric_offset, limit=limit)
+            paging = result.get("paging", {}) if isinstance(result.get("paging"), dict) else {}
+            payload = {
+                "source": "zhihu",
+                "entity_type": entity_type,
+                "item_id": item_id,
+                "cursor": str(numeric_offset),
+                "next_cursor": _extract_next_offset(str(paging.get("next", ""))),
+                "limit": limit,
+                "has_more": not bool(paging.get("is_end", True)),
+                "total_count": paging.get("totals"),
+                "comments": [
+                    _normalize_comment(comment)
+                    for comment in result.get("data", [])
+                    if isinstance(comment, dict)
+                ],
+            }
+        else:
+            result = client.get_article_comments(item_id, offset=offset, limit=limit)
+            paging = result.get("paging", {}) if isinstance(result.get("paging"), dict) else {}
+            counts = result.get("counts", {}) if isinstance(result.get("counts"), dict) else {}
+            payload = {
+                "source": "zhihu",
+                "entity_type": entity_type,
+                "item_id": item_id,
+                "cursor": offset,
+                "next_cursor": _extract_next_offset(str(paging.get("next", ""))),
+                "limit": limit,
+                "has_more": not bool(paging.get("is_end", True)),
+                "total_count": counts.get("total_counts") or paging.get("totals"),
+                "comments": [
+                    _normalize_comment(comment)
+                    for comment in result.get("data", [])
+                    if isinstance(comment, dict)
+                ],
+            }
+
+    if as_json:
+        click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
+        return
+
+    if payload.get("warning"):
+        print_info(str(payload["warning"]))
+        return
+    if not payload["comments"]:
+        print_info("No comments")
+        return
+
+    for index, comment in enumerate(payload["comments"], start=1):
+        likes = format_count(comment.get("vote_count", 0))
+        console.print(
+            f"[cyan]{index}. {comment.get('author', {}).get('name', 'Anonymous')}[/cyan] "
+            f"[dim]({likes} likes)[/dim]"
+        )
+        console.print(str(comment.get("content", ""))[:180])
+        console.print()
 
 
 @click.command()

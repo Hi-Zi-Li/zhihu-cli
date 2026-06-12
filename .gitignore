@@ -3,6 +3,8 @@ __pycache__/
 *.py[cod]
 *$py.class
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
 
 # Distribution
 dist/
@@ -31,6 +33,14 @@ cookies.json
 # Temp
 *.tmp
 *.bak
+*.log
 .coverage
+htmlcov/
+playwright-report/
+test-results/
 
+# Local login/test artifacts
+login_qrcode.png
 *.jpg
+*.jpeg
+*.png

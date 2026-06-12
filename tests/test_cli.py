@@ -44,14 +44,14 @@ class TestCliGroup:
     def test_version(self, runner):
         result = runner.invoke(cli, ["--version"])
         assert result.exit_code == 0
-        assert "0.1.0" in result.output
+        assert "0.2.4" in result.output
 
     def test_all_commands_registered(self, runner):
         result = runner.invoke(cli, ["--help"])
         expected = [
             "login", "logout", "status", "whoami",
             "search", "hot", "question", "answer", "answers",
-            "feed", "topic",
+            "feed", "topic", "hydrate",
             "user", "user-answers", "user-articles",
             "followers", "following",
             "vote", "follow-question",
@@ -90,7 +90,10 @@ class TestLogoutCommand:
 
 class TestLoginCommand:
     def test_login_with_valid_cookie(self, runner, tmp_config_dir):
-        result = runner.invoke(cli, ["login", "--cookie", "z_c0=test_abc"])
+        result = runner.invoke(
+            cli,
+            ["login", "--cookie", "z_c0=test_abc; _xsrf=xsrf_123; d_c0=dc0_456"],
+        )
         assert result.exit_code == 0
         assert "Cookie saved" in result.output
 
@@ -103,7 +106,27 @@ class TestLoginCommand:
         result = runner.invoke(cli, ["login", "--help"])
         assert result.exit_code == 0
         assert "--qrcode" in result.output
+        assert "--browser-assisted" in result.output
         assert "--cookie" in result.output
+
+    def test_login_browser_assisted_uses_qrcode_backend(self, runner, tmp_config_dir):
+        with patch("zhihu_cli.commands.auth.qrcode_login", return_value="z_c0=t; _xsrf=x; d_c0=d"), patch(
+            "zhihu_cli.commands.auth._verify_cookies", return_value=True
+        ):
+            result = runner.invoke(cli, ["login", "--browser-assisted"])
+        assert result.exit_code == 0
+        assert "Login successful" in result.output
+
+    def test_login_browser_assisted_unavailable(self, runner, tmp_config_dir):
+        from zhihu_cli.auth import BrowserQrLoginUnavailable
+
+        with patch(
+            "zhihu_cli.commands.auth.qrcode_login",
+            side_effect=BrowserQrLoginUnavailable("missing runtime"),
+        ):
+            result = runner.invoke(cli, ["login", "--browser-assisted"])
+        assert result.exit_code == 1
+        assert "Browser-assisted login unavailable" in result.output
 
 
 class TestWhoamiCommand:
@@ -172,7 +195,7 @@ class TestHotCommand:
         with patch(_CLIENT_PATCH, return_value=mc):
             result = runner.invoke(cli, ["hot", "--limit", "2"])
             assert result.exit_code == 0
-            assert "Trending" in result.output
+            assert "Hot question 1" in result.output
 
     def test_hot_json(self, runner, saved_cookies, mock_hot_list):
         mc = _make_mock_client(get_hot_list=mock_hot_list)
@@ -212,6 +235,38 @@ class TestAnswerCommand:
             result = runner.invoke(cli, ["answer", "67890"])
             assert result.exit_code == 0
             assert "Author1" in result.output
+
+
+class TestHydrateCommand:
+    def test_hydrate_answer_json(self, runner, saved_cookies):
+        answer_data = {
+            "id": "67890",
+            "content": "<p>First paragraph.</p><p>Second paragraph.</p><ul><li>Point A</li><li>Point B</li></ul>",
+            "excerpt": "This is the answer",
+            "author": {"name": "Author1", "id": "u1"},
+            "voteup_count": 42,
+            "comment_count": 3,
+            "question": {"title": "Question title"},
+        }
+        comment_data = {
+            "data": [
+                {
+                    "id": "c1",
+                    "content": "<p>Nice</p>",
+                    "vote_count": 5,
+                    "author": {"name": "Commenter", "id": "u2"},
+                }
+            ]
+        }
+        mc = _make_mock_client(get_answer=answer_data, get_answer_comments=comment_data)
+        with patch(_CLIENT_PATCH, return_value=mc):
+            result = runner.invoke(cli, ["hydrate", "answer", "67890", "--comment-limit", "1", "--json"])
+            assert result.exit_code == 0
+            data = json.loads(result.output)
+            assert data["mode"] == "hydrate"
+            assert data["entity_type"] == "answer"
+            assert data["answer"]["body"] == "First paragraph.\nSecond paragraph.\n- Point A\n- Point B"
+            assert data["comments"][0]["author"]["name"] == "Commenter"
 
 
 # ── User commands ──────────────────────────────────────────────────────────────

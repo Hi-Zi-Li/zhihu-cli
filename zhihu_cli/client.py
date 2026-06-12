@@ -18,7 +18,6 @@ from pathlib import Path
 from typing import Any
 
 import requests
-from PIL import Image
 
 from .config import (
     DEFAULT_TIMEOUT,
@@ -191,6 +190,11 @@ class ZhihuClient:
         }
         return self._get(url, params=params)
 
+    def get_article(self, article_id: str) -> dict:
+        """Get a single article detail from Zhuanlan."""
+        url = f"{ZHIHU_ZHUANLAN_API}/articles/{article_id}"
+        return self._get(url)
+
     # ===== User Profile =====
 
     def get_user_profile(self, url_token: str) -> dict:
@@ -336,6 +340,22 @@ class ZhihuClient:
         }
         return self._get(url, params=params)
 
+    def get_article_comments(
+        self,
+        article_id: str,
+        offset: str = "",
+        limit: int = 20,
+        order_by: str = "score",
+    ) -> dict:
+        """Get root comments on an article."""
+        url = f"{ZHIHU_API_V4}/comment_v5/articles/{article_id}/root_comment"
+        params = {
+            "order_by": order_by,
+            "limit": limit,
+            "offset": offset,
+        }
+        return self._get(url, params=params)
+
     # ===== Vote =====
 
     def vote_up(self, answer_id: str) -> bool:
@@ -432,6 +452,8 @@ class ZhihuClient:
 
         # Step 4: Get image dimensions
         try:
+            from PIL import Image
+
             with Image.open(path) as img:
                 image_info["width"], image_info["height"] = img.size
         except Exception:

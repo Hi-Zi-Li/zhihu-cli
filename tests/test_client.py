@@ -226,6 +226,31 @@ class TestGetAnswer:
             assert "answers/67890" in mock_get.call_args[0][0]
 
 
+class TestGetArticle:
+    def test_article_api_url(self, client):
+        article = {"id": "97139851", "title": "Article title"}
+        with patch.object(
+            client._session, "get",
+            return_value=_make_response(200, json_data=article),
+        ) as mock_get:
+            result = client.get_article("97139851")
+            assert result["title"] == "Article title"
+            assert "zhuanlan.zhihu.com/api/articles/97139851" in mock_get.call_args[0][0]
+
+
+class TestGetArticleComments:
+    def test_article_comments_api_url(self, client):
+        payload = {"data": []}
+        with patch.object(
+            client._session, "get",
+            return_value=_make_response(200, json_data=payload),
+        ) as mock_get:
+            result = client.get_article_comments("97139851", limit=5)
+            assert result["data"] == []
+            assert "comment_v5/articles/97139851/root_comment" in mock_get.call_args[0][0]
+            assert mock_get.call_args[1]["params"]["limit"] == 5
+
+
 # ── get_user_profile ──────────────────────────────────────────────────────────
 
 

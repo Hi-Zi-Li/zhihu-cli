@@ -9,8 +9,12 @@ import pytest
 
 from zhihu_cli.auth import (
     _dict_to_cookie_str,
+    _enrich_browser_cookie_dict,
+    _export_browser_context_cookies,
     _has_required_cookies,
+    _normalize_browser_cookies,
     _render_qr_half_blocks,
+    _validate_browser_exported_session,
     clear_cookies,
     cookie_str_to_dict,
     get_cookie_string,
@@ -81,6 +85,90 @@ class TestHasRequiredCookies:
 
     def test_empty_dict(self):
         assert not _has_required_cookies({})
+
+
+class TestBrowserCookieHelpers:
+    def test_normalize_browser_cookies_keeps_required_subset(self):
+        result = _normalize_browser_cookies(
+            [
+                {"name": "z_c0", "value": "token", "domain": ".zhihu.com"},
+                {"name": "_xsrf", "value": "xsrf", "domain": ".zhihu.com"},
+                {"name": "d_c0", "value": "device", "domain": ".zhihu.com"},
+                {"name": "other", "value": "ignored", "domain": ".zhihu.com"},
+                {"name": "z_c0", "value": "wrong", "domain": ".example.com"},
+            ]
+        )
+        assert result == {
+            "z_c0": "token",
+            "_xsrf": "xsrf",
+            "d_c0": "device",
+        }
+
+    def test_export_browser_context_cookies_uses_context_cookie_api(self):
+        class _FakeContext:
+            def cookies(self):
+                return [
+                    {"name": "z_c0", "value": "token", "domain": ".zhihu.com"},
+                    {"name": "_xsrf", "value": "xsrf", "domain": ".zhihu.com"},
+                ]
+
+        class _FakePage:
+            context = _FakeContext()
+
+        result = _export_browser_context_cookies(_FakePage())
+        assert result == {"z_c0": "token", "_xsrf": "xsrf"}
+
+    def test_enrich_browser_cookie_dict_fetches_missing_required_cookies(self, monkeypatch):
+        monkeypatch.setattr(
+            "zhihu_cli.auth._fetch_missing_cookies",
+            lambda cookie_dict: {
+                **cookie_dict,
+                "_xsrf": "filled-xsrf",
+                "d_c0": "filled-device",
+            },
+        )
+        result = _enrich_browser_cookie_dict({"z_c0": "token-only"})
+        assert result == {
+            "z_c0": "token-only",
+            "_xsrf": "filled-xsrf",
+            "d_c0": "filled-device",
+        }
+
+    def test_validate_browser_exported_session_returns_enriched_cookie_dict(self, monkeypatch):
+        monkeypatch.setattr(
+            "zhihu_cli.auth._fetch_missing_cookies",
+            lambda cookie_dict: {
+                **cookie_dict,
+                "_xsrf": "filled-xsrf",
+                "d_c0": "filled-device",
+            },
+        )
+
+        class _FakeClient:
+            def __init__(self, cookie_dict):
+                self.cookie_dict = cookie_dict
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                return False
+
+            def get_self_info(self):
+                return {"id": "123", "name": "TestUser"}
+
+        monkeypatch.setattr("zhihu_cli.client.ZhihuClient", _FakeClient)
+
+        result = _validate_browser_exported_session(
+            {"z_c0": "token-only"},
+            retries=1,
+            wait_s=0,
+        )
+        assert result == {
+            "z_c0": "token-only",
+            "_xsrf": "filled-xsrf",
+            "d_c0": "filled-device",
+        }
 
 
 # ── save_cookies & load ────────────────────────────────────────────────────────
